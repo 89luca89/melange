@@ -225,6 +225,20 @@ func (c *Compiled) compilePipeline(ctx context.Context, sm *SubstitutionMap, pip
 	// When compiling an already-compiled config, `uses` will be redundant and FYI only,
 	// so ignore it if there is also a `pipelines` spelled out.
 	if uses != "" && len(pipeline.Pipeline) == 0 {
+		// Handle the special "checkpoint" pipeline that captures filesystem snapshots
+		if uses == "checkpoint" {
+			checkpointName := name
+			if n, ok := with["name"]; ok && n != "" {
+				checkpointName = n
+			}
+			if checkpointName == "" {
+				checkpointName = "checkpoint"
+			}
+			pipeline.Checkpoint = checkpointName
+			pipeline.Uses = "" // Clear uses since we handled it
+			return nil
+		}
+
 		var data []byte
 		// Set this to fail up front in case there are no pipeline dirs specified
 		// and we can't find them.

@@ -21,7 +21,6 @@ import (
 
 	apko_types "chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/apko/pkg/options"
-
 	"chainguard.dev/melange/pkg/build/sbom"
 	"chainguard.dev/melange/pkg/config"
 	"chainguard.dev/melange/pkg/container"
@@ -299,15 +298,6 @@ func WithCreateBuildLog(createBuildLog bool) Option {
 	}
 }
 
-// WithPersistLintResults indicates whether to persist lint results to JSON files
-// in the packages/{arch} directory.
-func WithPersistLintResults(persistLintResults bool) Option {
-	return func(b *Build) error {
-		b.PersistLintResults = persistLintResults
-		return nil
-	}
-}
-
 // WithDebug indicates whether debug logging of pipelines should be enabled.
 func WithDebug(debug bool) Option {
 	return func(b *Build) error {
@@ -426,6 +416,22 @@ func WithIgnoreSignatures(ignore bool) Option {
 	}
 }
 
+// WithCheckpoints enables capturing filesystem snapshots at checkpoint pipeline steps.
+func WithCheckpoints(checkpoints bool) Option {
+	return func(b *Build) error {
+		b.Checkpoints = checkpoints
+		return nil
+	}
+}
+
+// WithCheckpointsDir sets the directory where checkpoint snapshots are saved.
+func WithCheckpointsDir(dir string) Option {
+	return func(b *Build) error {
+		b.CheckpointsDir = dir
+		return nil
+	}
+}
+
 // WithGenerateProvenance sets whether to generate SLSA provenance during the build.
 func WithGenerateProvenance(provenance bool) Option {
 	return func(b *Build) error {
@@ -435,7 +441,6 @@ func WithGenerateProvenance(provenance bool) Option {
 }
 
 // WithSBOMGenerator sets a custom SBOM generator for the build.
-// If not set, the default generator will be used.
 func WithSBOMGenerator(generator sbom.Generator) Option {
 	return func(b *Build) error {
 		b.SBOMGenerator = generator

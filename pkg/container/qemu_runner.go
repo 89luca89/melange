@@ -490,6 +490,47 @@ func (bw *qemu) WorkspaceTar(ctx context.Context, cfg *Config, extraFiles []stri
 	return os.Open(outFile.Name())
 }
 
+// CheckpointTar returns a tar stream of the entire workspace for checkpoint/restore.
+func (bw *qemu) CheckpointTar(ctx context.Context, cfg *Config) (io.ReadCloser, error) {
+	if cfg.SSHKey == nil {
+		return nil, nil
+	}
+
+	outFile, err := os.Create(filepath.Join(cfg.WorkspaceDir, "melange-checkpoint.tar"))
+	if err != nil {
+		return nil, err
+	}
+	defer outFile.Close()
+
+	clog.FromContext(ctx).Infof("capturing full workspace for checkpoint")
+	// Capture the entire /home/build directory, excluding named pipes
+	retrieveCommand := "cd /mount/home/build && find . -type p -delete > /dev/null 2>&1 || true && tar cvpf - --xattrs --acls ."
+
+	log := clog.FromContext(ctx)
+	stderr := logwriter.New(log.Debug)
+	err = sendSSHCommand(ctx,
+		cfg.SSHControlClient,
+		cfg,
+		nil,
+		stderr,
+		outFile,
+		false,
+		[]string{"sh", "-c", retrieveCommand},
+	)
+	if err != nil {
+		var buf bytes.Buffer
+		_, cerr := io.Copy(&buf, outFile)
+		if cerr != nil {
+			clog.FromContext(ctx).Errorf("failed to tar checkpoint: %v", cerr)
+			return nil, cerr
+		}
+		clog.FromContext(ctx).Errorf("failed to tar checkpoint: %v", buf.String())
+		return nil, err
+	}
+
+	return os.Open(outFile.Name())
+}
+
 // GetReleaseData returns the OS information (os-release contents) for the Qemu runner.
 func (bw *qemu) GetReleaseData(ctx context.Context, cfg *Config) (*apko_build.ReleaseData, error) {
 	// in case of buildless pipelines we just nop
@@ -812,6 +853,15 @@ func createMicroVM(ctx context.Context, cfg *Config) error {
 	baseargs = append(baseargs, "-device", "virtio-blk-pci,drive=image.tar,iothread=io2,packed=on,num-queues="+fmt.Sprintf("%d", nproc/2))
 	baseargs = append(baseargs, "-blockdev", "driver=raw,node-name=image.tar,file.driver=file,file.filename="+cfg.ImgRef)
 
+	// If restoring from checkpoint, attach tar as block device for direct extraction
+	// /dev/vdc = checkpoint tar file (read-only)
+	if cfg.CheckpointTarPath != "" {
+		clog.FromContext(ctx).Infof("qemu: attaching checkpoint tar as block device: %s", cfg.CheckpointTarPath)
+		baseargs = append(baseargs, "-object", "iothread,id=io3")
+		baseargs = append(baseargs, "-device", "virtio-blk-pci,drive=checkpoint.tar,iothread=io3,packed=on,num-queues="+fmt.Sprintf("%d", nproc/2))
+		baseargs = append(baseargs, "-blockdev", "driver=raw,node-name=checkpoint.tar,read-only=on,file.driver=file,file.filename="+cfg.CheckpointTarPath)
+	}
+
 	// qemu-system-x86_64 or qemu-system-aarch64...
 	// #nosec G204 - Architecture is from validated configuration, not user input
 	qemuCmd := exec.CommandContext(ctx, fmt.Sprintf("qemu-system-%s", cfg.Arch.ToAPK()), baseargs...)
@@ -990,25 +1040,45 @@ func createMicroVM(ctx context.Context, cfg *Config) error {
 	// This has to happen as the user we are building as, so
 	// files copied are owned by the build user, and thus cleanup
 	// step that happens at the end of the build to remove the
-	// files succeeds
-	copyFilesCommand := fmt.Sprintf(
-		"find /mnt/ -mindepth 1 -maxdepth 1 -exec cp -a {} /home/build/ \\; && "+
-			"chown -R %s /home/build",
-		cfg.SSHBuildClient.User(),
-	)
-	err = sendSSHCommand(ctx,
-		cfg.SSHControlBuildClient,
-		cfg,
-		nil,
-		stderr,
-		stdout,
-		false,
-		[]string{"sh", "-c", copyFilesCommand},
-	)
-	if err != nil {
-		err = qemuCmd.Process.Kill()
+	// files succeeds.
+	if cfg.CheckpointTarPath != "" {
+		// Extract checkpoint tar from block device directly to /home/build
+		// /dev/vdc = checkpoint tar (attached as virtio-blk)
+		clog.FromContext(ctx).Infof("qemu: restoring checkpoint from block device")
+		extractCmd := fmt.Sprintf(
+			"cat /dev/vdc | tar xf - -C /home/build && chown -R %s /home/build",
+			cfg.SSHBuildClient.User(),
+		)
+		err = sendSSHCommand(ctx, cfg.SSHControlBuildClient, cfg, nil, stderr, stdout, false,
+			[]string{"sh", "-c", extractCmd})
 		if err != nil {
-			return err
+			clog.FromContext(ctx).Errorf("qemu: failed to restore checkpoint: %v", err)
+			err = qemuCmd.Process.Kill()
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("restoring checkpoint: %w", err)
+		}
+	} else {
+		copyFilesCommand := fmt.Sprintf(
+			"find /mnt/ -mindepth 1 -maxdepth 1 -exec cp -a {} /home/build/ \\; && "+
+				"chown -R %s /home/build",
+			cfg.SSHBuildClient.User(),
+		)
+		err = sendSSHCommand(ctx,
+			cfg.SSHControlBuildClient,
+			cfg,
+			nil,
+			stderr,
+			stdout,
+			false,
+			[]string{"sh", "-c", copyFilesCommand},
+		)
+		if err != nil {
+			err = qemuCmd.Process.Kill()
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1258,6 +1328,7 @@ func generateDiskFile(ctx context.Context, diskSize string) (string, error) {
 	clog.FromContext(ctx).Debugf("qemu: generating disk image, name %s, size %s:", diskName.Name(), diskSize)
 	return diskName.Name(), os.Truncate(diskName.Name(), size)
 }
+
 
 // qemu will open the port way before the ssh daemon is ready to listen
 // so we need to check if we get the SSH banner in order to value if the server

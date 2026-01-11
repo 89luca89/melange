@@ -160,3 +160,59 @@ func Test_stripComments(t *testing.T) {
 		t.Errorf("want:\n%s\ngot:\n%s", wantErr, err)
 	}
 }
+
+func TestCompileCheckpoint(t *testing.T) {
+	tests := []struct {
+		name           string
+		pipeline       config.Pipeline
+		wantCheckpoint string
+	}{
+		{
+			name: "checkpoint with name from with",
+			pipeline: config.Pipeline{
+				Uses: "checkpoint",
+				With: map[string]string{"name": "my-checkpoint"},
+			},
+			wantCheckpoint: "my-checkpoint",
+		},
+		{
+			name: "checkpoint with name from pipeline name",
+			pipeline: config.Pipeline{
+				Name: "named-checkpoint",
+				Uses: "checkpoint",
+			},
+			wantCheckpoint: "named-checkpoint",
+		},
+		{
+			name: "checkpoint with default name",
+			pipeline: config.Pipeline{
+				Uses: "checkpoint",
+			},
+			wantCheckpoint: "checkpoint",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			build := &Build{
+				Configuration: &config.Configuration{
+					Pipeline: []config.Pipeline{tc.pipeline},
+				},
+			}
+
+			if err := build.Compile(context.Background()); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			got := build.Configuration.Pipeline[0].Checkpoint
+			if got != tc.wantCheckpoint {
+				t.Errorf("Checkpoint: want %q, got %q", tc.wantCheckpoint, got)
+			}
+
+			// Uses should be cleared after checkpoint handling
+			if build.Configuration.Pipeline[0].Uses != "" {
+				t.Errorf("Uses should be cleared, got %q", build.Configuration.Pipeline[0].Uses)
+			}
+		})
+	}
+}

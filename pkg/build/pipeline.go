@@ -18,6 +18,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/signal"
@@ -189,13 +190,46 @@ type pipelineRunner struct {
 	interactive bool
 	config      *container.Config
 	runner      container.Runner
+	// checkpointPath returns the full path to a named checkpoint tar file.
+	// Set to nil to disable checkpoint capture.
+	checkpointPath func(name string) string
+	// skipUntilCheckpoint tracks which checkpoint to skip until (empty = don't skip)
+	skipUntilCheckpoint string
+	// skipping is true while we're skipping pipelines before the resume checkpoint
+	skipping bool
 }
 
+// runPipeline executes a single pipeline step. Returns (ran, err) where ran=true
+// if the step was executed or intentionally skipped (e.g., during checkpoint resume).
 func (r *pipelineRunner) runPipeline(ctx context.Context, pipeline *config.Pipeline) (bool, error) {
 	log := clog.FromContext(ctx)
 
+	// When resuming from a checkpoint, we skip all steps until we reach the checkpoint
+	// we restored from. This avoids re-running work that's already in the restored state.
+	if r.skipping {
+		if pipeline.Checkpoint == r.skipUntilCheckpoint {
+			// We've reached the checkpoint we restored from - stop skipping
+			log.Infof("reached resume checkpoint %q, continuing build", pipeline.Checkpoint)
+			r.skipping = false
+			return true, nil
+		}
+		if id := identity(pipeline); id != unidentifiablePipeline {
+			log.Debugf("skipping step %q (resuming from checkpoint)", id)
+		}
+		return true, nil
+	}
+
 	if result, err := shouldRun(pipeline.If); !result {
 		return result, err
+	}
+
+	// Handle checkpoint pipelines - capture filesystem snapshot
+	if pipeline.Checkpoint != "" {
+		if r.checkpointPath == nil {
+			log.Debugf("skipping checkpoint %q (checkpoints disabled)", pipeline.Checkpoint)
+			return true, nil
+		}
+		return r.captureCheckpoint(ctx, pipeline.Checkpoint)
 	}
 
 	debugOption := ' '
@@ -259,6 +293,43 @@ func (r *pipelineRunner) runPipeline(ctx context.Context, pipeline *config.Pipel
 		}
 	}
 
+	return true, nil
+}
+
+// captureCheckpoint saves a tar archive of the current workspace state.
+// This allows future builds to resume from this point by restoring the tar
+// and skipping all pipeline steps up to this checkpoint.
+func (r *pipelineRunner) captureCheckpoint(ctx context.Context, name string) (bool, error) {
+	log := clog.FromContext(ctx)
+
+	outPath := r.checkpointPath(name)
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return false, fmt.Errorf("creating checkpoint directory: %w", err)
+	}
+
+	// Get full workspace tar from runner (includes source files, not just melange-out)
+	rc, err := r.runner.CheckpointTar(ctx, r.config)
+	if err != nil {
+		return false, fmt.Errorf("getting checkpoint tar: %w", err)
+	}
+	if rc == nil {
+		log.Warnf("checkpoint %q: runner returned nil checkpoint tar", name)
+		return true, nil
+	}
+	defer rc.Close()
+
+	f, err := os.Create(outPath)
+	if err != nil {
+		return false, fmt.Errorf("creating checkpoint file: %w", err)
+	}
+	defer f.Close()
+
+	n, err := io.Copy(f, rc)
+	if err != nil {
+		return false, fmt.Errorf("writing checkpoint: %w", err)
+	}
+
+	log.Infof("checkpoint %q: captured %d bytes to %s", name, n, outPath)
 	return true, nil
 }
 

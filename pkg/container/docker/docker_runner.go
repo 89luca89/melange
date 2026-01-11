@@ -365,6 +365,12 @@ func (dk *docker) WorkspaceTar(ctx context.Context, cfg *mcontainer.Config, extr
 	return nil, nil
 }
 
+// CheckpointTar implements Runner
+// This is a noop for Docker, which uses bind-mounts to manage the workspace
+func (dk *docker) CheckpointTar(ctx context.Context, cfg *mcontainer.Config) (io.ReadCloser, error) {
+	return nil, nil
+}
+
 // GetReleaseData returns the OS information (os-release contents) for the Docker runner.
 func (dk *docker) GetReleaseData(ctx context.Context, cfg *mcontainer.Config) (*apko_build.ReleaseData, error) {
 	if cfg.PodID == "" {

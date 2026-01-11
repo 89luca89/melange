@@ -611,6 +611,9 @@ type Pipeline struct {
 	WorkDir string `json:"working-directory,omitempty" yaml:"working-directory,omitempty"`
 	// Optional: environment variables to override apko
 	Environment map[string]string `json:"environment,omitempty" yaml:"environment,omitempty"`
+	// Checkpoint marks this pipeline step as a checkpoint that captures the guest filesystem.
+	// Set automatically when uses: checkpoint is specified. The value is the checkpoint name.
+	Checkpoint string `json:"checkpoint,omitempty" yaml:"checkpoint,omitempty"`
 }
 
 // SHA256 generates a digest based on the text provided

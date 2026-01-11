@@ -44,6 +44,10 @@ type Runner interface {
 	// The io.ReadCloser itself is a tar stream, which can be written to an io.Writer as is,
 	// or passed to an fs.FS processor
 	WorkspaceTar(ctx context.Context, cfg *Config, extraFiles []string) (io.ReadCloser, error)
+	// CheckpointTar returns a tar stream of the entire workspace for checkpoint/restore.
+	// Unlike WorkspaceTar which only captures melange-out, this captures everything in /home/build
+	// including source files, so builds can be resumed from any point.
+	CheckpointTar(ctx context.Context, cfg *Config) (io.ReadCloser, error)
 	// GetReleaseData returns the release data for the container's OS (os-release)
 	GetReleaseData(ctx context.Context, cfg *Config) (*apko_build.ReleaseData, error)
 }

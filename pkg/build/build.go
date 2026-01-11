@@ -141,6 +141,12 @@ type Build struct {
 	DefaultTimeout        time.Duration
 	Auth                  map[string]options.Auth
 	IgnoreSignatures      bool
+	// Checkpoints enables capturing filesystem snapshots at checkpoint pipeline steps.
+	// Only supported with the QEMU runner.
+	Checkpoints bool
+	// CheckpointsDir is the base directory for storing checkpoint tar files.
+	// Checkpoints are saved to <CheckpointsDir>/checkpoints/<arch>/<package>/<name>.tar
+	CheckpointsDir string
 
 	EnabledBuildOptions []string
 
@@ -628,12 +634,22 @@ func (b *Build) BuildPackage(ctx context.Context) error {
 	}
 	b.SBOMGroup = NewSBOMGroup(pkgNames...)
 
-	pr := &pipelineRunner{
-		interactive: b.Interactive,
-		debug:       b.Debug,
-		config:      b.workspaceConfig(ctx),
-		runner:      b.Runner,
+	// Check for existing checkpoints to resume from (QEMU only)
+	var resumeCheckpoint string
+	if b.Checkpoints && b.Runner.Name() == "qemu" {
+		resumeCheckpoint = b.findLatestCheckpoint(ctx)
 	}
+
+	pr := &pipelineRunner{
+		interactive:         b.Interactive,
+		debug:               b.Debug,
+		config:              b.workspaceConfig(ctx),
+		runner:              b.Runner,
+		checkpointPath:      b.checkpointPath,
+		skipUntilCheckpoint: resumeCheckpoint,
+		skipping:            resumeCheckpoint != "",
+	}
+
 
 	if b.EmptyWorkspace {
 		log.Debugf("empty workspace requested")
@@ -643,11 +659,14 @@ func (b *Build) BuildPackage(ctx context.Context) error {
 			return fmt.Errorf("mkdir -p %s: %w", b.WorkspaceDir, err)
 		}
 
-		fs := apkofs.DirFS(ctx, b.SourceDir)
-		if fs != nil {
-			log.Infof("populating workspace %s from %s", b.WorkspaceDir, b.SourceDir)
-			if err := b.populateWorkspace(ctx, fs); err != nil {
-				return fmt.Errorf("unable to populate workspace: %w", err)
+		// Populate workspace from source (skip if resuming from checkpoint)
+		if resumeCheckpoint == "" {
+			fs := apkofs.DirFS(ctx, b.SourceDir)
+			if fs != nil {
+				log.Infof("populating workspace %s from %s", b.WorkspaceDir, b.SourceDir)
+				if err := b.populateWorkspace(ctx, fs); err != nil {
+					return fmt.Errorf("unable to populate workspace: %w", err)
+				}
 			}
 		}
 	}
@@ -658,6 +677,12 @@ func (b *Build) BuildPackage(ctx context.Context) error {
 
 	linterQueue := []linterTarget{}
 	cfg := b.workspaceConfig(ctx)
+
+	// Attach checkpoint tar as block device for direct extraction (QEMU only)
+	if resumeCheckpoint != "" {
+		cfg.CheckpointTarPath = b.checkpointPath(resumeCheckpoint)
+		log.Infof("will restore checkpoint %q from block device", resumeCheckpoint)
+	}
 
 	imgRef, err := b.buildGuest(ctx, b.Configuration.Environment, b.GuestFS)
 	if err != nil {
@@ -1170,8 +1195,15 @@ func (b *Build) retrieveWorkspace(ctx context.Context, fs apkofs.FullFS) error {
 			}
 
 		case tar.TypeLink:
+			// Skip self-referential hard links (degenerate tar entries)
+			// Use filepath.Clean to handle path variations like "LICENSE" vs "./LICENSE"
+			if filepath.Clean(hdr.Name) == filepath.Clean(hdr.Linkname) {
+				continue
+			}
+			// Remove existing file if present (may exist from checkpoint restore)
+			_ = fs.Remove(hdr.Name)
 			if err := fs.Link(hdr.Linkname, hdr.Name); err != nil {
-				return err
+				return fmt.Errorf("creating hard link %s -> %s: %w", hdr.Name, hdr.Linkname, err)
 			}
 
 		default:
@@ -1330,3 +1362,56 @@ func stringsFromByteSlice(buf []byte) []string {
 	}
 	return result
 }
+
+// checkpointDir returns the directory where checkpoint tar files are stored.
+// Example: ./checkpoints/x86_64/zlib/
+func (b *Build) checkpointDir() string {
+	base := b.CheckpointsDir
+	if base == "" {
+		base = "."
+	}
+	return filepath.Join(base, "checkpoints", b.Arch.ToAPK(), b.Configuration.Package.Name)
+}
+
+// checkpointPath returns the full path to a checkpoint tar file for the given name.
+// Example: checkpointPath("after-configure") -> ./checkpoints/x86_64/zlib/after-configure.tar
+func (b *Build) checkpointPath(name string) string {
+	return filepath.Join(b.checkpointDir(), name+".tar")
+}
+
+// findLatestCheckpoint scans the checkpoint directory and returns the name of the
+// most recently modified checkpoint, or "" if none exist.
+//
+// We use modification time (not checkpoint order in the YAML) so that re-running
+// a build naturally picks up the furthest point of progress.
+func (b *Build) findLatestCheckpoint(ctx context.Context) string {
+	log := clog.FromContext(ctx)
+
+	entries, err := os.ReadDir(b.checkpointDir())
+	if err != nil {
+		return ""
+	}
+
+	var latestName string
+	var latestTime time.Time
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tar") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+			latestName = strings.TrimSuffix(entry.Name(), ".tar")
+		}
+	}
+
+	if latestName != "" {
+		log.Infof("found checkpoint %q to resume from", latestName)
+	}
+	return latestName
+}
+

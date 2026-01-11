@@ -238,6 +238,12 @@ func (bw *bubblewrap) WorkspaceTar(ctx context.Context, cfg *Config, extraFiles 
 	return nil, nil
 }
 
+// CheckpointTar implements Runner
+// This is a noop for Bubblewrap, which uses bind-mounts to manage the workspace
+func (bw *bubblewrap) CheckpointTar(ctx context.Context, cfg *Config) (io.ReadCloser, error) {
+	return nil, nil
+}
+
 // GetReleaseData returns the OS information (os-release contents) for the Bubblewrap runner.
 func (bw *bubblewrap) GetReleaseData(ctx context.Context, cfg *Config) (*apko_build.ReleaseData, error) {
 	// Read the os-release through a bubblewrap command

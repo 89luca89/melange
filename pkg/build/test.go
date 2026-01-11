@@ -314,10 +314,11 @@ func (t *Test) TestPackage(ctx context.Context) error {
 	}
 
 	pr := &pipelineRunner{
-		interactive: t.Interactive,
-		debug:       t.Debug,
-		config:      cfg,
-		runner:      t.Runner,
+		interactive:    t.Interactive,
+		debug:          t.Debug,
+		config:         cfg,
+		runner:         t.Runner,
+		checkpointPath: nil, // checkpoints not supported in tests
 	}
 
 	if !t.IsTestless() {
@@ -375,10 +376,11 @@ func (t *Test) TestPackage(ctx context.Context) error {
 			subCfg.Arch = t.Arch
 
 			pr := &pipelineRunner{
-				interactive: t.Interactive,
-				debug:       t.Debug,
-				config:      subCfg,
-				runner:      t.Runner,
+				interactive:    t.Interactive,
+				debug:          t.Debug,
+				config:         subCfg,
+				runner:         t.Runner,
+				checkpointPath: nil,
 			}
 
 			if err := t.Runner.StartPod(ctx, subCfg); err != nil {
